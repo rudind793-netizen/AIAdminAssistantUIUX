@@ -1,0 +1,10 @@
+{
+  "description": "An internal chatbot that helps employees instantly find answers and SOP references, streamlining company workflows with a modern, user-friendly interface.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
