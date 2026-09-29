@@ -34,6 +34,48 @@ export default defineConfig(({ mode }) => {
       port: parseInt(process.env.PORT || '8443'),
       strictPort: true,
       watch: { ignored: ['**/.figma/**'] },
+      proxy: {
+        '/n8n': {
+          target: 'https://ianrun47.app.n8n.cloud',
+          changeOrigin: true,
+          secure: true,
+          rewrite: (path) => {
+            if (path.includes('/n8n/chat')) return '/webhook/e1a8c29d-d4b5-4b4d-9156-f3625bbce403/chat'
+            if (path.includes('/n8n/register')) return '/webhook/register'
+            if (path.includes('/n8n/login')) return '/webhook/login'
+            if (path.includes('/n8n/upload-sop')) return '/webhook/upload-sop'
+            if (path.includes('/n8n/get-sop-docs')) return '/webhook/get-sop-docs'
+            if (path.includes('/n8n/delete-sop')) return '/webhook/delete-sop'
+            if (path.includes('/n8n/get-signed-url')) return '/webhook/get-signed-url'
+            return path.replace('/n8n', '/webhook')
+          },
+          configure: (proxy) => {
+            proxy.on('proxyReq', (proxyReq, req) => {
+              console.log('[proxy] →', req.method, req.url)
+              proxyReq.removeHeader('x-forwarded-for')
+              proxyReq.removeHeader('x-forwarded-host')
+              proxyReq.removeHeader('x-forwarded-proto')
+              proxyReq.removeHeader('x-real-ip')
+              proxyReq.removeHeader('sec-fetch-site')
+              proxyReq.removeHeader('sec-fetch-mode')
+              proxyReq.removeHeader('sec-fetch-dest')
+              proxyReq.setHeader('host', 'ianrun47.app.n8n.cloud')
+              proxyReq.setHeader('origin', 'http://localhost')
+              proxyReq.setHeader('referer', 'http://localhost/')
+              proxyReq.setHeader('user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+            })
+            proxy.on('proxyRes', (proxyRes, req) => {
+              console.log('[proxy] ←', proxyRes.statusCode, req.url)
+              proxyRes.headers['access-control-allow-origin'] = '*'
+              proxyRes.headers['access-control-allow-methods'] = 'GET,POST,PUT,DELETE,OPTIONS'
+              proxyRes.headers['access-control-allow-headers'] = 'Content-Type,Authorization'
+            })
+            proxy.on('error', (err, req) => {
+              console.error('[proxy] error', req.url, err.message)
+            })
+          },
+        },
+      },
     },
     preview: {
       host: '0.0.0.0',

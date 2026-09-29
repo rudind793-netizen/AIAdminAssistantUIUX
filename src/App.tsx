@@ -11,75 +11,50 @@ interface AccountRecord {
   name: string
   jabatan: string
   departemen: string
-  nip: string
+  nik: string
 }
 
-const DB_KEY = "sgn_account_db"
+// ── API endpoints ─────────────────────────────────────────────────────────────
+//    Semua URL DIBACA dari import.meta.env (file .env) supaya saat pindah ke
+//    server perusahaan sendiri cukup mengganti satu file .env — TIDAK ADA URL
+//    yang ditulis langsung (hardcoded) di kode komponen. Lihat .env / .env.example.
+//    Nilai default (fallback) = URL produksi n8n saat ini, dipakai HANYA jika
+//    .env hilang / gagal ter-load. Sumber utama tetap file .env.
+const N8N_BASE = "https://ianrun47.app.n8n.cloud"
+const N8N_REGISTER_URL =
+  import.meta.env.VITE_REGISTER_URL ?? `${N8N_BASE}/webhook/register`
+const N8N_LOGIN_URL =
+  import.meta.env.VITE_LOGIN_URL ?? `${N8N_BASE}/webhook/login`
+const N8N_CHAT_URL =
+  import.meta.env.VITE_CHAT_URL ??
+  `${N8N_BASE}/webhook/e1a8c29d-d4b5-4b4d-9156-f3625bbce403/chat`
+const N8N_UPLOAD_SOP_URL =
+  import.meta.env.VITE_UPLOAD_SOP_URL ?? `${N8N_BASE}/webhook/upload-sop`
+const N8N_GET_SOP_DOCS_URL =
+  import.meta.env.VITE_GET_SOP_DOCS_URL ?? `${N8N_BASE}/webhook/get-sop-docs`
+const N8N_DELETE_SOP_URL =
+  import.meta.env.VITE_DELETE_SOP_URL ?? `${N8N_BASE}/webhook/delete-sop`
 
-const SEED_ACCOUNTS: AccountRecord[] = [
-  {
-    email: "admin@admin.sgn.com",
-    password: "Admin@SGN2026",
-    role: "admin",
-    name: "Administrator SGN",
-    jabatan: "System Administrator",
-    departemen: "IT & Digital",
-    nip: "SGN-ADM-001",
-  },
-  {
-    email: "user@sgn.com",
-    password: "User@SGN2026",
-    role: "user",
-    name: "Budi Santoso",
-    jabatan: "Staff Pengadaan",
-    departemen: "Purchasing",
-    nip: "SGN-USR-042",
-  },
-]
-
-function loadAccountDB(): AccountRecord[] {
-  try {
-    const raw = localStorage.getItem(DB_KEY)
-    if (!raw) return SEED_ACCOUNTS
-    const parsed: AccountRecord[] = JSON.parse(raw)
-    // Ensure seed accounts always exist
-    const emails = new Set(parsed.map(a => a.email))
-    const merged = [...parsed]
-    SEED_ACCOUNTS.forEach(s => { if (!emails.has(s.email)) merged.push(s) })
-    return merged
-  } catch {
-    return SEED_ACCOUNTS
-  }
+async function proxiedFetch(
+  url: string,
+  options: RequestInit,
+): Promise<Response> {
+  return fetch(url, options)
 }
+const N8N_UPLOAD_FORM_URL =
+  import.meta.env.VITE_UPLOAD_URL ??
+  "https://ianrun47.app.n8n.cloud/form/9cb0ce8b-2496-438a-8c67-859c790614e0"
 
-function saveAccountDB(db: AccountRecord[]) {
-  try { localStorage.setItem(DB_KEY, JSON.stringify(db)) } catch {}
-}
-
-function registerAccount(data: { email: string; password: string; name: string; nip: string }): { ok: boolean; error?: string } {
-  const db = loadAccountDB()
-  const email = data.email.toLowerCase()
-  if (db.find(a => a.email === email)) return { ok: false, error: "Email sudah terdaftar" }
-  const role: Role = email.endsWith(ADMIN_DOMAIN) ? "admin" : "user"
-  const newAccount: AccountRecord = { email, password: data.password, role, name: data.name, jabatan: "", departemen: "", nip: data.nip }
-  saveAccountDB([...db, newAccount])
-  return { ok: true }
-}
-
-const ADMIN_DOMAIN = "@admin.sgn.com"
-const USER_DOMAIN = "@sgn.com"
+// Domain email untuk deteksi role — juga dari env agar mudah diganti tanpa
+// menyentuh kode saat migrasi ke domain / server lain. Fallback jaring pengaman.
+const ADMIN_DOMAIN = import.meta.env.VITE_ADMIN_DOMAIN ?? "@admin.sgn.com"
+const USER_DOMAIN = import.meta.env.VITE_USER_DOMAIN ?? "@sgn.com"
 
 function detectRole(email: string): Role | null {
   const e = email.toLowerCase()
   if (e.endsWith(ADMIN_DOMAIN)) return "admin"
   if (e.endsWith(USER_DOMAIN) && !e.endsWith(ADMIN_DOMAIN)) return "user"
   return null
-}
-
-function authenticate(email: string, password: string): AccountRecord | null {
-  if (!detectRole(email)) return null
-  const db = loadAccountDB()
-  return db.find(u => u.email === email.toLowerCase() && u.password === password) ?? null
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -105,13 +80,55 @@ interface SopRef {
   badge: string
 }
 
+// File rujukan yang dikirim balik oleh endpoint chat (VITE_CHAT_URL).
+// name  = nama SOP / dokumen yang ditampilkan ke user
+// url   = link file asli yang bisa diunduh (http(s) atau data URL)
+interface ReferencedFile {
+  name: string
+  url: string
+}
+
 interface Message {
   id: number
   role: "user" | "ai"
   text: string
   sopRefs?: SopRef[]
+  referencedFiles?: ReferencedFile[]
   feedback?: "satisfied" | "unsatisfied" | null
   timestamp: Date
+}
+
+// Ekstrak daftar file rujukan dari response chat n8n secara defensif.
+// Mendukung beberapa kemungkinan nama field tanpa membuat data dummy —
+// jika backend belum mengirim data file, hasilnya array kosong.
+function parseReferencedFiles(data: Record<string, unknown>): ReferencedFile[] {
+  const raw =
+    data.referencedFiles as unknown ??
+    data.referenced_files as unknown ??
+    data.files as unknown ??
+    data.documents as unknown ??
+    data.attachments as unknown ??
+    data.sources as unknown
+  if (!Array.isArray(raw)) return []
+  const files: ReferencedFile[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue
+    const o = item as Record<string, unknown>
+    const name =
+      o.name as string ??
+      o.fileName as string ??
+      o.title as string ??
+      o.label as string
+    const url =
+      o.url as string ??
+      o.fileUrl as string ??
+      o.downloadUrl as string ??
+      o.fileDataUrl as string ??
+      o.link as string ??
+      o.href as string
+    if (name && url) files.push({ name, url })
+  }
+  return files
 }
 
 interface ChatSession {
@@ -127,7 +144,7 @@ interface UserProfile {
   jabatan: string
   departemen: string
   perusahaan: string
-  nip: string
+  nik: string
   photoUrl?: string
   role?: Role
 }
@@ -300,192 +317,6 @@ const _DEMO_SESSIONS_UNUSED: ChatSession[] = [
   },
 ]
 
-function makeAiResponse(question: string): { text: string; sopRefs?: SopRef[] } {
-  const q = question.toLowerCase()
-
-  if (
-    q.includes("bagian pengadaan") ||
-    q.includes("divisi pengadaan") ||
-    q.includes("unit pengadaan")
-  ) {
-    return {
-      text: "Berikut informasi tentang **Bagian Pengadaan** berdasarkan beberapa sumber regulasi yang berlaku:",
-      sopRefs: [
-        {
-          source: "SGN",
-          title: "Struktur Organisasi PT SGN — Divisi Pengadaan",
-          chapter: "Bab 2 — Unit Kerja Pengadaan",
-          pages: "Hal. 8–10",
-          color: "#1e40af",
-          badge: "SGN",
-        },
-        {
-          source: "Holding",
-          title: "Pedoman Pengadaan Grup — Holding SGN",
-          chapter: "Bab 1 — Cakupan dan Wewenang",
-          pages: "Hal. 3–6",
-          color: "#7c3aed",
-          badge: "Holding",
-        },
-        {
-          source: "Perpres",
-          title: "Perpres No. 16 Tahun 2018",
-          chapter: "Pasal 8 — Unit Kerja Pengadaan",
-          pages: "Pasal 8–12",
-          color: "#0369a1",
-          badge: "Perpres",
-        },
-      ],
-    }
-  }
-
-  if (
-    q.includes("po") ||
-    q.includes("purchase order") ||
-    q.includes("pengadaan")
-  ) {
-    return {
-      text: "Untuk membuat Purchase Order (PO), ikuti prosedur berikut:\n\n1. **Pastikan Vendor Terdaftar** — Vendor harus terdaftar di sistem e-procurement dengan kode vendor aktif.\n2. **Buat Purchase Request (PR)** — Ajukan PR melalui modul Procurement dan tunggu persetujuan atasan.\n3. **Input Data PO** — Lengkapi kode vendor, deskripsi item, kuantitas, harga satuan, dan tanggal pengiriman.\n4. **Proses Persetujuan** — PO > Rp 50 juta memerlukan minimal dua tingkat persetujuan manajemen.\n5. **Kirim ke Vendor** — Sistem akan otomatis mengirimkan konfirmasi ke email vendor setelah PO disetujui.",
-      sopRefs: [
-        {
-          source: "SGN",
-          title: "SOP Pengadaan Barang & Jasa No. SGN/PRO/001",
-          chapter: "Bab 3 — Pembuatan PO",
-          pages: "Hal. 12–15",
-          color: "#1e40af",
-          badge: "SGN",
-        },
-        {
-          source: "Holding",
-          title: "Pedoman Pengadaan Grup — Holding SGN",
-          chapter: "Bab 4 — Pemesanan dan PO",
-          pages: "Hal. 22–26",
-          color: "#7c3aed",
-          badge: "Holding",
-        },
-        {
-          source: "Perpres",
-          title: "Perpres No. 16 Tahun 2018",
-          chapter: "Pasal 38 — Pengadaan Langsung",
-          pages: "Pasal 38–42",
-          color: "#0369a1",
-          badge: "Perpres",
-        },
-      ],
-    }
-  }
-
-  if (q.includes("vendor") || q.includes("supplier")) {
-    return {
-      text: "Pendaftaran vendor baru mengikuti prosedur berikut:\n\n1. **Lengkapi Dokumen Legalitas** — SIUP, NPWP, TDP, Akta Pendirian.\n2. **Submit via Portal** — Unggah dokumen di portal e-Vendor SGN.\n3. **Verifikasi** — Tim Procurement akan memverifikasi dalam 5 hari kerja.\n4. **Penilaian Vendor** — Vendor baru menjalani evaluasi awal sebelum transaksi pertama.",
-      sopRefs: [
-        {
-          source: "SGN",
-          title: "SOP Manajemen Vendor No. SGN/VND/002",
-          chapter: "Bab 1 — Registrasi Vendor",
-          pages: "Hal. 4–9",
-          color: "#1e40af",
-          badge: "SGN",
-        },
-        {
-          source: "Holding",
-          title: "Kebijakan Vendor Grup Holding",
-          chapter: "Bab 2 — Kualifikasi Vendor",
-          pages: "Hal. 11–14",
-          color: "#7c3aed",
-          badge: "Holding",
-        },
-      ],
-    }
-  }
-
-  if (q.includes("cuti") || q.includes("izin") || q.includes("absen")) {
-    return {
-      text: "Pengajuan cuti tahunan dilakukan melalui sistem HRIS dengan langkah:\n\n1. Login ke portal HRIS dan pilih menu **Pengajuan Cuti**.\n2. Pilih jenis cuti, tanggal mulai, dan tanggal selesai.\n3. Isi alasan cuti dan submit ke atasan langsung.\n4. Atasan menyetujui atau menolak dalam 2 hari kerja.\n\nHak cuti karyawan tetap adalah 12 hari kerja per tahun.",
-      sopRefs: [
-        {
-          source: "SGN",
-          title: "Peraturan Perusahaan PT SGN 2025",
-          chapter: "Pasal 24 — Cuti Tahunan",
-          pages: "Hal. 45–48",
-          color: "#1e40af",
-          badge: "SGN",
-        },
-        {
-          source: "Permen",
-          title: "UU Ketenagakerjaan No. 13 Tahun 2003",
-          chapter: "Pasal 79 — Istirahat dan Cuti",
-          pages: "Pasal 79–80",
-          color: "#0f766e",
-          badge: "Permen",
-        },
-      ],
-    }
-  }
-
-  if (q.includes("lembur")) {
-    return {
-      text: "Pengajuan klaim lembur dilakukan melalui HRIS paling lambat H+3 setelah hari lembur. Pastikan sudah ada **Surat Perintah Lembur (SPL)** dari atasan sebelum melaksanakan lembur. Tarif lembur mengikuti ketentuan PP No. 35 Tahun 2021.",
-      sopRefs: [
-        {
-          source: "SGN",
-          title: "SOP Lembur No. SGN/HR/005",
-          chapter: "Bab 2 — Prosedur Klaim",
-          pages: "Hal. 6–9",
-          color: "#1e40af",
-          badge: "SGN",
-        },
-        {
-          source: "Permen",
-          title: "PP No. 35 Tahun 2021 — Perjanjian Kerja",
-          chapter: "Pasal 31 — Lembur",
-          pages: "Pasal 31–33",
-          color: "#0f766e",
-          badge: "Permen",
-        },
-      ],
-    }
-  }
-
-  if (q.includes("anggaran") || q.includes("budget") || q.includes("biaya")) {
-    return {
-      text: "Pengajuan anggaran departemen melewati tiga tahap persetujuan:\n\n1. **Kepala Departemen** — validasi kebutuhan internal.\n2. **Direktur Terkait** — review kesesuaian program kerja.\n3. **CFO / Direktur Keuangan** — persetujuan akhir untuk nilai di atas Rp 500 juta.\n\nPengajuan dilakukan melalui sistem e-Budget paling lambat tanggal 20 setiap bulan.",
-      sopRefs: [
-        {
-          source: "SGN",
-          title: "SOP Perencanaan Anggaran No. SGN/FIN/003",
-          chapter: "Bab 2 — Alur Persetujuan",
-          pages: "Hal. 10–14",
-          color: "#1e40af",
-          badge: "SGN",
-        },
-        {
-          source: "Holding",
-          title: "Kebijakan Keuangan Grup Holding",
-          chapter: "Bab 3 — Batas Kewenangan Anggaran",
-          pages: "Hal. 18–22",
-          color: "#7c3aed",
-          badge: "Holding",
-        },
-      ],
-    }
-  }
-
-  return {
-    text: 'Berdasarkan dokumen SOP yang tersedia, saya menemukan beberapa referensi yang relevan. Silakan ajukan pertanyaan lebih spesifik agar saya dapat memberikan jawaban yang lebih tepat, misalnya: "Bagaimana prosedur pengadaan barang?", "Siapa yang menyetujui PO?", atau "Di mana bagian pengadaan?"',
-    sopRefs: [
-      {
-        source: "SGN",
-        title: "Indeks SOP PT SGN 2025",
-        chapter: "Daftar Dokumen Aktif",
-        pages: "Hal. 1–3",
-        color: "#1e40af",
-        badge: "SGN",
-      },
-    ],
-  }
-}
-
 function formatTime(date: Date) {
   return date.toLocaleTimeString("id-ID", {
     hour: "2-digit",
@@ -505,6 +336,83 @@ function formatDate(date: Date) {
     month: "short",
     year: "numeric",
   })
+}
+
+function renderInlineMarkdown(text: string, linkClassName: string) {
+  return text
+    .split(/(\*\*.*?\*\*|\*[^*\n]+\*|\[[^\]]+\]\([^)]+\))/g)
+    .map((part, index) => {
+      const link = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/)
+      if (link) {
+        return (
+          <a
+            key={index}
+            href={link[2]}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={linkClassName}
+          >
+            {link[1]}
+          </a>
+        )
+      }
+
+      if (part.startsWith("**") && part.endsWith("**")) {
+        return (
+          <strong key={index} style={{ fontWeight: 600 }}>
+            {part.slice(2, -2)}
+          </strong>
+        )
+      }
+
+      if (part.startsWith("*") && part.endsWith("*")) {
+        return <em key={index}>{part.slice(1, -1)}</em>
+      }
+
+      return part
+    })
+}
+
+function renderMessageMarkdown(text: string, linkClassName: string) {
+  const lines = text.split("\n")
+  const content = []
+  let bulletItems: string[] = []
+  let blockIndex = 0
+
+  const flushBullets = () => {
+    if (bulletItems.length === 0) return
+    const items = bulletItems
+    content.push(
+      <ul
+        key={`list-${blockIndex++}`}
+        className="list-disc pl-5 my-1 space-y-0.5"
+      >
+        {items.map((item, index) => (
+          <li key={index}>{renderInlineMarkdown(item, linkClassName)}</li>
+        ))}
+      </ul>,
+    )
+    bulletItems = []
+  }
+
+  lines.forEach((line, index) => {
+    const bullet = line.match(/^\s*-\s+(.*)$/)
+    if (bullet) {
+      bulletItems.push(bullet[1])
+      return
+    }
+
+    flushBullets()
+    content.push(
+      <span key={`line-${blockIndex++}`}>
+        {renderInlineMarkdown(line, linkClassName)}
+        {index < lines.length - 1 && <br />}
+      </span>,
+    )
+  })
+
+  flushBullets()
+  return content
 }
 
 // ── Logo ──────────────────────────────────────────────────────────────────────
@@ -545,38 +453,90 @@ function SgnLogo({
 
 // ── Register ──────────────────────────────────────────────────────────────────
 function RegisterPage({ onBack }: { onBack: () => void }) {
-  const [form, setForm] = useState({ email: '', name: '', nik: '', password: '', confirm: '' })
+  const [form, setForm] = useState({
+    email: "",
+    name: "",
+    nik: "",
+    password: "",
+    confirm: "",
+  })
   const [showPass, setShowPass] = useState(false)
   const [showConfirm, setShowConfirm] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [submitted, setSubmitted] = useState(false)
 
   const set = (k: string, v: string) => {
-    setForm(p => ({ ...p, [k]: v }))
-    setErrors(p => ({ ...p, [k]: '' }))
+    setForm((p) => ({ ...p, [k]: v }))
+    setErrors((p) => ({ ...p, [k]: "" }))
   }
 
   const validate = () => {
     const e: Record<string, string> = {}
-    if (!form.name.trim()) e.name = 'Nama wajib diisi'
-    if (!form.email.trim()) e.email = 'Email wajib diisi'
-    else if (!form.email.toLowerCase().endsWith('@sgn.com') && !form.email.toLowerCase().endsWith('@admin.sgn.com'))
-      e.email = 'Gunakan email domain @sgn.com atau @admin.sgn.com'
-    if (!form.nik.trim()) e.nik = 'NIK Pegawai wajib diisi'
-    if (!form.password) e.password = 'Kata sandi wajib diisi'
-    else if (form.password.length < 8) e.password = 'Minimal 8 karakter'
-    if (!form.confirm) e.confirm = 'Konfirmasi kata sandi wajib diisi'
-    else if (form.confirm !== form.password) e.confirm = 'Kata sandi tidak cocok'
+    if (!form.name.trim()) e.name = "Nama wajib diisi"
+    if (!form.email.trim()) e.email = "Email wajib diisi"
+    else if (!detectRole(form.email))
+      e.email = `Gunakan email domain ${USER_DOMAIN} atau ${ADMIN_DOMAIN}`
+    if (!form.nik.trim()) e.nik = "NIK Pegawai wajib diisi"
+    if (!form.password) e.password = "Kata sandi wajib diisi"
+    else if (form.password.length < 8) e.password = "Minimal 8 karakter"
+    if (!form.confirm) e.confirm = "Konfirmasi kata sandi wajib diisi"
+    else if (form.confirm !== form.password)
+      e.confirm = "Kata sandi tidak cocok"
     return e
   }
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const [submitting, setSubmitting] = useState(false)
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     const errs = validate()
-    if (Object.keys(errs).length > 0) { setErrors(errs); return }
-    const result = registerAccount({ email: form.email, password: form.password, name: form.name, nip: form.nik })
-    if (!result.ok) { setErrors({ email: result.error ?? 'Gagal mendaftar' }); return }
-    setSubmitted(true)
+    if (Object.keys(errs).length > 0) {
+      setErrors(errs)
+      return
+    }
+    setSubmitting(true)
+    try {
+      const role = form.email.toLowerCase().endsWith(ADMIN_DOMAIN)
+        ? "admin"
+        : "user"
+      const payload = {
+        nama_lengkap: form.name,
+        name: form.name,
+        email: form.email.toLowerCase(),
+        nik: form.nik,
+        password: form.password,
+        role,
+      }
+      // text/plain + no-cors = simple request, tidak ada CORS preflight
+      // Response opaque (tidak bisa dibaca) — asumsikan sukses, data tersimpan di localStorage
+      console.log("[Register] Sending to:", N8N_REGISTER_URL)
+      await fetch(N8N_REGISTER_URL, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain" },
+        body: JSON.stringify(payload),
+      })
+      // Simpan data registrasi lokal agar profil terisi saat login
+      try {
+        const cache = JSON.parse(
+          localStorage.getItem("sgn_profile_cache") ?? "{}",
+        )
+        cache[form.email.toLowerCase()] = {
+          name: form.name,
+          nik: form.nik,
+          role,
+        }
+        localStorage.setItem("sgn_profile_cache", JSON.stringify(cache))
+      } catch {}
+      setSubmitted(true)
+    } catch (err) {
+      console.error("[Register] Error:", err)
+      const msg = err instanceof Error ? err.message : String(err)
+      setErrors({
+        email: `Gagal mengirim data: ${msg}. Periksa koneksi internet Anda.`,
+      })
+      setSubmitting(false)
+    }
   }
 
   const strength = (() => {
@@ -589,26 +549,58 @@ function RegisterPage({ onBack }: { onBack: () => void }) {
     if (/[^A-Za-z0-9]/.test(p)) s++
     return s
   })()
-  const strengthLabel = ['', 'Lemah', 'Cukup', 'Kuat', 'Sangat Kuat'][strength]
-  const strengthColor = ['', '#ef4444', '#f59e0b', '#10b981', '#1e40af'][strength]
+  const strengthLabel = ["", "Lemah", "Cukup", "Kuat", "Sangat Kuat"][strength]
+  const strengthColor = ["", "#ef4444", "#f59e0b", "#10b981", "#1e40af"][
+    strength
+  ]
 
-  const detectedRole = form.email.toLowerCase().endsWith('@admin.sgn.com') ? 'admin' : form.email.includes('@sgn.com') ? 'user' : null
+  const detectedRole = form.email.includes("@") ? detectRole(form.email) : null
 
-  if (submitted) return (
-    <div className="min-h-screen flex items-center justify-center bg-[#f8fafc] p-6">
-      <div className="bg-white rounded-2xl shadow-xl p-10 max-w-sm w-full text-center">
-        <div className="w-16 h-16 rounded-full bg-[#e8f0fe] flex items-center justify-center mx-auto mb-4">
-          <svg className="w-8 h-8 text-[#1e40af]" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+  if (submitted)
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#f8fafc] p-6">
+        <div className="bg-white rounded-2xl shadow-xl p-10 max-w-sm w-full text-center">
+          <div className="w-16 h-16 rounded-full bg-[#e8f0fe] flex items-center justify-center mx-auto mb-4">
+            <svg
+              className="w-8 h-8 text-[#1e40af]"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              viewBox="0 0 24 24"
+            >
+              <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </div>
+          <h2
+            className="text-lg text-[#1e293b] mb-2"
+            style={{ fontWeight: 700 }}
+          >
+            Pendaftaran Berhasil!
+          </h2>
+          <p className="text-sm text-[#64748b] mb-1">
+            Akun{" "}
+            <span className="text-[#1e40af]" style={{ fontWeight: 600 }}>
+              {form.email}
+            </span>{" "}
+            berhasil didaftarkan.
+          </p>
+          <p className="text-xs text-[#94a3b8] mb-6">
+            Silakan tunggu verifikasi dari Administrator sebelum dapat login.
+          </p>
+          <button
+            onClick={onBack}
+            className="w-full py-2.5 rounded-xl text-white text-sm"
+            style={{
+              fontWeight: 600,
+              background:
+                "linear-gradient(135deg, rgb(30, 64, 175) 0%, rgb(37, 99, 235) 100%)",
+            }}
+          >
+            Kembali ke Login
+          </button>
         </div>
-        <h2 className="text-lg text-[#1e293b] mb-2" style={{ fontWeight: 700 }}>Pendaftaran Berhasil!</h2>
-        <p className="text-sm text-[#64748b] mb-1">Akun <span className="text-[#1e40af]" style={{ fontWeight: 600 }}>{form.email}</span> berhasil didaftarkan.</p>
-        <p className="text-xs text-[#94a3b8] mb-6">Silakan tunggu verifikasi dari Administrator sebelum dapat login.</p>
-        <button onClick={onBack} className="w-full py-2.5 rounded-xl text-white text-sm" style={{ fontWeight: 600, background: 'linear-gradient(135deg, rgb(30, 64, 175) 0%, rgb(37, 99, 235) 100%)' }}>
-          Kembali ke Login
-        </button>
       </div>
-    </div>
-  )
+    )
 
   return (
     <div className="min-h-screen flex flex-col lg:flex-row">
@@ -616,111 +608,333 @@ function RegisterPage({ onBack }: { onBack: () => void }) {
       <div className="flex flex-col justify-center items-center w-full lg:w-[45%] px-6 sm:px-14 py-12 bg-white min-h-screen lg:min-h-0">
         <div className="w-full max-w-sm">
           <div className="flex flex-col items-center text-center mb-8">
-            <img src={logoImg} alt="SGN" className="w-16 h-16 object-contain mb-2" />
-            <div className="text-[#1e40af] text-lg leading-tight" style={{ fontWeight: 700 }}>PT SGN</div>
+            <img
+              src={logoImg}
+              alt="SGN"
+              className="w-16 h-16 object-contain mb-2"
+            />
+            <div
+              className="text-[#1e40af] text-lg leading-tight"
+              style={{ fontWeight: 700 }}
+            >
+              PT SGN
+            </div>
             <div className="text-[#94a3b8] text-xs">AI Admin Assistant</div>
           </div>
 
-          <h1 className="text-2xl text-[#1e40af] mb-1" style={{ fontWeight: 700 }}>Daftar Akun Baru</h1>
-          <p className="text-sm text-[#64748b] mb-6">Isi form di bawah untuk mendaftar</p>
+          <h1
+            className="text-2xl text-[#1e40af] mb-1"
+            style={{ fontWeight: 700 }}
+          >
+            Daftar Akun Baru
+          </h1>
+          <p className="text-sm text-[#64748b] mb-6">
+            Isi form di bawah untuk mendaftar
+          </p>
 
           <form onSubmit={handleSubmit} className="space-y-4">
+            {errors.general && (
+              <div className="rounded-xl bg-red-50 border border-red-200 px-4 py-3 text-xs text-red-700 leading-relaxed">
+                {errors.general}
+              </div>
+            )}
             {/* Nama */}
             <div>
-              <label className="block text-xs text-[#334155] mb-1.5" style={{ fontWeight: 600 }}>Nama Lengkap <span className="text-red-500">*</span></label>
-              <input type="text" value={form.name} onChange={e => set('name', e.target.value)} placeholder="Nama sesuai KTP"
-                className={`w-full px-4 py-2.5 rounded-xl border text-sm text-[#1e293b] placeholder-[#94a3b8] focus:outline-none focus:ring-2 focus:ring-[#1e40af]/20 focus:border-[#1e40af] transition-all ${errors.name ? 'border-red-300 bg-red-50' : 'border-[#e2e8f0]'}`} />
-              {errors.name && <p className="text-[11px] text-red-500 mt-1">{errors.name}</p>}
+              <label
+                className="block text-xs text-[#334155] mb-1.5"
+                style={{ fontWeight: 600 }}
+              >
+                Nama Lengkap <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={form.name}
+                onChange={(e) => set("name", e.target.value)}
+                placeholder="Nama sesuai KTP"
+                className={`w-full px-4 py-2.5 rounded-xl border text-sm text-[#1e293b] placeholder-[#94a3b8] focus:outline-none focus:ring-2 focus:ring-[#1e40af]/20 focus:border-[#1e40af] transition-all ${
+                  errors.name ? "border-red-300 bg-red-50" : "border-[#e2e8f0]"
+                }`}
+              />
+              {errors.name && (
+                <p className="text-[11px] text-red-500 mt-1">{errors.name}</p>
+              )}
             </div>
 
             {/* Email */}
             <div>
               <div className="flex items-center justify-between mb-1.5">
-                <label className="text-xs text-[#334155]" style={{ fontWeight: 600 }}>Email <span className="text-red-500">*</span></label>
+                <label
+                  className="text-xs text-[#334155]"
+                  style={{ fontWeight: 600 }}
+                >
+                  Email <span className="text-red-500">*</span>
+                </label>
                 {detectedRole && (
-                  <span className="text-[10px] px-2 py-0.5 rounded-full text-white flex items-center gap-1" style={{ fontWeight: 600, background: detectedRole === 'admin' ? 'linear-gradient(135deg,#7c3aed,#a78bfa)' : 'linear-gradient(135deg, rgb(30, 64, 175) 0%, rgb(37, 99, 235) 100%)' }}>
-                    {detectedRole === 'admin' ? 'Administrator' : 'User'}
+                  <span
+                    className="text-[10px] px-2 py-0.5 rounded-full text-white flex items-center gap-1"
+                    style={{
+                      fontWeight: 600,
+                      background:
+                        detectedRole === "admin"
+                          ? "linear-gradient(135deg,#7c3aed,#a78bfa)"
+                          : "linear-gradient(135deg, rgb(30, 64, 175) 0%, rgb(37, 99, 235) 100%)",
+                    }}
+                  >
+                    {detectedRole === "admin" ? "Administrator" : "User"}
                   </span>
                 )}
               </div>
-              <input type="email" value={form.email} onChange={e => set('email', e.target.value)} placeholder="nama@sgn.com"
-                className={`w-full px-4 py-2.5 rounded-xl border text-sm text-[#1e293b] placeholder-[#94a3b8] focus:outline-none focus:ring-2 focus:ring-[#1e40af]/20 focus:border-[#1e40af] transition-all ${errors.email ? 'border-red-300 bg-red-50' : 'border-[#e2e8f0]'}`} />
-              {errors.email ? <p className="text-[11px] text-red-500 mt-1">{errors.email}</p>
-                : <p className="text-[10px] text-[#94a3b8] mt-1">User: @sgn.com · Admin: @admin.sgn.com</p>}
+              <input
+                type="email"
+                value={form.email}
+                onChange={(e) => set("email", e.target.value)}
+                placeholder="nama@sgn.com"
+                className={`w-full px-4 py-2.5 rounded-xl border text-sm text-[#1e293b] placeholder-[#94a3b8] focus:outline-none focus:ring-2 focus:ring-[#1e40af]/20 focus:border-[#1e40af] transition-all ${
+                  errors.email ? "border-red-300 bg-red-50" : "border-[#e2e8f0]"
+                }`}
+              />
+              {errors.email ? (
+                <p className="text-[11px] text-red-500 mt-1">{errors.email}</p>
+              ) : (
+                <p className="text-[10px] text-[#94a3b8] mt-1">
+                  User: @sgn.com · Admin: @admin.sgn.com
+                </p>
+              )}
             </div>
 
             {/* NIK */}
             <div>
-              <label className="block text-xs text-[#334155] mb-1.5" style={{ fontWeight: 600 }}>NIK Pegawai <span className="text-red-500">*</span></label>
-              <input type="text" value={form.nik} onChange={e => set('nik', e.target.value)} placeholder="Contoh: SGN-USR-001"
-                className={`w-full px-4 py-2.5 rounded-xl border text-sm text-[#1e293b] placeholder-[#94a3b8] focus:outline-none focus:ring-2 focus:ring-[#1e40af]/20 focus:border-[#1e40af] transition-all ${errors.nik ? 'border-red-300 bg-red-50' : 'border-[#e2e8f0]'}`} />
-              {errors.nik && <p className="text-[11px] text-red-500 mt-1">{errors.nik}</p>}
+              <label
+                className="block text-xs text-[#334155] mb-1.5"
+                style={{ fontWeight: 600 }}
+              >
+                NIK Pegawai <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={form.nik}
+                onChange={(e) => set("nik", e.target.value)}
+                placeholder="Contoh: SGN-USR-001"
+                className={`w-full px-4 py-2.5 rounded-xl border text-sm text-[#1e293b] placeholder-[#94a3b8] focus:outline-none focus:ring-2 focus:ring-[#1e40af]/20 focus:border-[#1e40af] transition-all ${
+                  errors.nik ? "border-red-300 bg-red-50" : "border-[#e2e8f0]"
+                }`}
+              />
+              {errors.nik && (
+                <p className="text-[11px] text-red-500 mt-1">{errors.nik}</p>
+              )}
             </div>
 
             {/* Password */}
             <div>
-              <label className="block text-xs text-[#334155] mb-1.5" style={{ fontWeight: 600 }}>Kata Sandi <span className="text-red-500">*</span></label>
+              <label
+                className="block text-xs text-[#334155] mb-1.5"
+                style={{ fontWeight: 600 }}
+              >
+                Kata Sandi <span className="text-red-500">*</span>
+              </label>
               <div className="relative">
-                <input type={showPass ? 'text' : 'password'} value={form.password} onChange={e => set('password', e.target.value)} placeholder="Min. 8 karakter"
-                  className={`w-full px-4 py-2.5 pr-10 rounded-xl border text-sm text-[#1e293b] placeholder-[#94a3b8] focus:outline-none focus:ring-2 focus:ring-[#1e40af]/20 focus:border-[#1e40af] transition-all ${errors.password ? 'border-red-300 bg-red-50' : 'border-[#e2e8f0]'}`} />
-                <button type="button" onClick={() => setShowPass(p => !p)} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#94a3b8] hover:text-[#64748b]">
-                  {showPass ? <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-                    : <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>}
+                <input
+                  type={showPass ? "text" : "password"}
+                  value={form.password}
+                  onChange={(e) => set("password", e.target.value)}
+                  placeholder="Min. 8 karakter"
+                  className={`w-full px-4 py-2.5 pr-10 rounded-xl border text-sm text-[#1e293b] placeholder-[#94a3b8] focus:outline-none focus:ring-2 focus:ring-[#1e40af]/20 focus:border-[#1e40af] transition-all ${
+                    errors.password
+                      ? "border-red-300 bg-red-50"
+                      : "border-[#e2e8f0]"
+                  }`}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPass((p) => !p)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[#94a3b8] hover:text-[#64748b]"
+                >
+                  {showPass ? (
+                    <svg
+                      className="w-4 h-4"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                      viewBox="0 0 24 24"
+                    >
+                      <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94" />
+                      <path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19" />
+                      <line x1="1" y1="1" x2="23" y2="23" />
+                    </svg>
+                  ) : (
+                    <svg
+                      className="w-4 h-4"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                      viewBox="0 0 24 24"
+                    >
+                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                      <circle cx="12" cy="12" r="3" />
+                    </svg>
+                  )}
                 </button>
               </div>
               {/* Strength bar */}
               {form.password && (
                 <div className="mt-2">
                   <div className="flex gap-1 mb-1">
-                    {[1,2,3,4].map(i => (
-                      <div key={i} className="flex-1 h-1 rounded-full transition-all" style={{ background: i <= strength ? strengthColor : '#e2e8f0' }} />
+                    {[1, 2, 3, 4].map((i) => (
+                      <div
+                        key={i}
+                        className="flex-1 h-1 rounded-full transition-all"
+                        style={{
+                          background: i <= strength ? strengthColor : "#e2e8f0",
+                        }}
+                      />
                     ))}
                   </div>
-                  <p className="text-[10px]" style={{ color: strengthColor }}>{strengthLabel}</p>
+                  <p className="text-[10px]" style={{ color: strengthColor }}>
+                    {strengthLabel}
+                  </p>
                 </div>
               )}
-              {errors.password && <p className="text-[11px] text-red-500 mt-1">{errors.password}</p>}
+              {errors.password && (
+                <p className="text-[11px] text-red-500 mt-1">
+                  {errors.password}
+                </p>
+              )}
             </div>
 
             {/* Confirm password */}
             <div>
-              <label className="block text-xs text-[#334155] mb-1.5" style={{ fontWeight: 600 }}>Konfirmasi Kata Sandi <span className="text-red-500">*</span></label>
+              <label
+                className="block text-xs text-[#334155] mb-1.5"
+                style={{ fontWeight: 600 }}
+              >
+                Konfirmasi Kata Sandi <span className="text-red-500">*</span>
+              </label>
               <div className="relative">
-                <input type={showConfirm ? 'text' : 'password'} value={form.confirm} onChange={e => set('confirm', e.target.value)} placeholder="Ulangi kata sandi"
-                  className={`w-full px-4 py-2.5 pr-10 rounded-xl border text-sm text-[#1e293b] placeholder-[#94a3b8] focus:outline-none focus:ring-2 focus:ring-[#1e40af]/20 focus:border-[#1e40af] transition-all ${errors.confirm ? 'border-red-300 bg-red-50' : form.confirm && form.confirm === form.password ? 'border-[#10b981] bg-green-50' : 'border-[#e2e8f0]'}`} />
-                <button type="button" onClick={() => setShowConfirm(p => !p)} className="absolute right-3 top-1/2 -translate-y-1/2 text-[#94a3b8] hover:text-[#64748b]">
-                  {showConfirm ? <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
-                    : <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>}
+                <input
+                  type={showConfirm ? "text" : "password"}
+                  value={form.confirm}
+                  onChange={(e) => set("confirm", e.target.value)}
+                  placeholder="Ulangi kata sandi"
+                  className={`w-full px-4 py-2.5 pr-10 rounded-xl border text-sm text-[#1e293b] placeholder-[#94a3b8] focus:outline-none focus:ring-2 focus:ring-[#1e40af]/20 focus:border-[#1e40af] transition-all ${
+                    errors.confirm
+                      ? "border-red-300 bg-red-50"
+                      : form.confirm && form.confirm === form.password
+                        ? "border-[#10b981] bg-green-50"
+                        : "border-[#e2e8f0]"
+                  }`}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowConfirm((p) => !p)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[#94a3b8] hover:text-[#64748b]"
+                >
+                  {showConfirm ? (
+                    <svg
+                      className="w-4 h-4"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                      viewBox="0 0 24 24"
+                    >
+                      <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94" />
+                      <path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19" />
+                      <line x1="1" y1="1" x2="23" y2="23" />
+                    </svg>
+                  ) : (
+                    <svg
+                      className="w-4 h-4"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                      viewBox="0 0 24 24"
+                    >
+                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                      <circle cx="12" cy="12" r="3" />
+                    </svg>
+                  )}
                 </button>
                 {form.confirm && form.confirm === form.password && (
-                  <svg className="absolute right-8 top-1/2 -translate-y-1/2 w-4 h-4 text-[#10b981]" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24"><path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                  <svg
+                    className="absolute right-8 top-1/2 -translate-y-1/2 w-4 h-4 text-[#10b981]"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2.5}
+                    viewBox="0 0 24 24"
+                  >
+                    <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
                 )}
               </div>
-              {errors.confirm && <p className="text-[11px] text-red-500 mt-1">{errors.confirm}</p>}
+              {errors.confirm && (
+                <p className="text-[11px] text-red-500 mt-1">
+                  {errors.confirm}
+                </p>
+              )}
             </div>
 
-            <button type="submit" className="w-full py-2.5 rounded-xl text-white text-sm mt-2" style={{ fontWeight: 600, background: 'linear-gradient(135deg, rgb(30, 64, 175) 0%, rgb(37, 99, 235) 100%)' }}>
-              Daftar Sekarang
+            <button
+              type="submit"
+              disabled={submitting}
+              className="w-full py-2.5 rounded-xl text-white text-sm mt-2 disabled:opacity-60"
+              style={{
+                fontWeight: 600,
+                background:
+                  "linear-gradient(135deg, rgb(30, 64, 175) 0%, rgb(37, 99, 235) 100%)",
+              }}
+            >
+              {submitting ? "Mendaftarkan..." : "Daftar Sekarang"}
             </button>
 
             <p className="text-center text-xs text-[#94a3b8]">
-              Sudah punya akun?{' '}
-              <button type="button" onClick={onBack} className="text-[#1e40af] hover:underline" style={{ fontWeight: 600 }}>Masuk di sini</button>
+              Sudah punya akun?{" "}
+              <button
+                type="button"
+                onClick={onBack}
+                className="text-[#1e40af] hover:underline"
+                style={{ fontWeight: 600 }}
+              >
+                Masuk di sini
+              </button>
             </p>
           </form>
         </div>
       </div>
 
       {/* Right panel */}
-      <div className="hidden lg:flex flex-col justify-center items-center flex-1 relative overflow-hidden"
-        style={{ background: 'linear-gradient(135deg, rgb(30, 64, 175) 0%, rgb(37, 99, 235) 100%)' }}>
-        <div className="absolute inset-0 opacity-10" style={{ backgroundImage: 'radial-gradient(circle, rgba(255,255,255,0.6) 1px, transparent 1px)', backgroundSize: '28px 28px' }} />
+      <div
+        className="hidden lg:flex flex-col justify-center items-center flex-1 relative overflow-hidden"
+        style={{
+          background:
+            "linear-gradient(135deg, rgb(30, 64, 175) 0%, rgb(37, 99, 235) 100%)",
+        }}
+      >
+        <div
+          className="absolute inset-0 opacity-10"
+          style={{
+            backgroundImage:
+              "radial-gradient(circle, rgba(255,255,255,0.6) 1px, transparent 1px)",
+            backgroundSize: "28px 28px",
+          }}
+        />
         <div className="relative z-10 text-center px-12">
           <div className="w-20 h-20 bg-white/15 rounded-2xl flex items-center justify-center mx-auto mb-6">
-            <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24"><path d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z"/></svg>
+            <svg
+              className="w-10 h-10 text-white"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.5}
+              viewBox="0 0 24 24"
+            >
+              <path d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
+            </svg>
           </div>
-          <h2 className="text-white text-2xl mb-3" style={{ fontWeight: 700 }}>Bergabung dengan SGN</h2>
-          <p className="text-white/70 text-sm leading-relaxed max-w-xs mx-auto">Daftarkan akun Anda untuk mengakses AI Admin Assistant dan semua dokumen SOP perusahaan.</p>
+          <h2 className="text-white text-2xl mb-3" style={{ fontWeight: 700 }}>
+            Bergabung dengan SGN
+          </h2>
+          <p className="text-white/70 text-sm leading-relaxed max-w-xs mx-auto">
+            Daftarkan akun Anda untuk mengakses AI Admin Assistant dan semua
+            dokumen SOP perusahaan.
+          </p>
         </div>
       </div>
     </div>
@@ -728,7 +942,13 @@ function RegisterPage({ onBack }: { onBack: () => void }) {
 }
 
 // ── Login ─────────────────────────────────────────────────────────────────────
-function LoginPage({ onLogin, onRegister }: { onLogin: (account: AccountRecord) => void; onRegister: () => void }) {
+function LoginPage({
+  onLogin,
+  onRegister,
+}: {
+  onLogin: (account: AccountRecord) => void
+  onRegister: () => void
+}) {
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [loading, setLoading] = useState(false)
@@ -744,7 +964,7 @@ function LoginPage({ onLogin, onRegister }: { onLogin: (account: AccountRecord) 
     return null
   }
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
 
@@ -755,17 +975,43 @@ function LoginPage({ onLogin, onRegister }: { onLogin: (account: AccountRecord) 
     }
 
     setLoading(true)
-    setTimeout(() => {
-      const account = authenticate(email, password)
-      if (!account) {
-        setLoading(false)
-        setError(
-          "Email atau password salah. Pastikan menggunakan akun SGN yang terdaftar.",
+    try {
+      // no-cors + text/plain = simple request tanpa preflight
+      console.log("[Login] Sending to:", N8N_LOGIN_URL)
+      await fetch(N8N_LOGIN_URL, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain" },
+        body: JSON.stringify({ email: email.toLowerCase(), password }),
+      })
+      // Response opaque, tidak bisa diverifikasi — bangun profil dari localStorage + domain
+      let cached: { name?: string nik?: string role?: Role } = {}
+      try {
+        const store = JSON.parse(
+          localStorage.getItem("sgn_profile_cache") ?? "{}",
         )
-        return
+        cached = store[email.toLowerCase()] ?? {}
+      } catch {}
+      const account: AccountRecord = {
+        email: email.toLowerCase(),
+        password: "",
+        role: cached.role ?? detectRole(email) ?? "user",
+        name: cached.name ?? "",
+        jabatan: "",
+        departemen: "",
+        nik: cached.nik ?? "",
       }
+      console.log("[Login] Profile from cache:", account)
       onLogin(account)
-    }, 1000)
+    } catch (err) {
+      console.error("[Login] Error:", err)
+      setError(
+        `Gagal terhubung ke server: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+      setLoading(false)
+    }
   }
 
   return (
@@ -922,9 +1168,7 @@ function LoginPage({ onLogin, onRegister }: { onLogin: (account: AccountRecord) 
                 </button>
               </div>
             </div>
-            <div className="flex justify-end">
-
-            </div>
+            <div className="flex justify-end"></div>
             <div className="flex justify-end">
               <button
                 type="button"
@@ -969,7 +1213,13 @@ function LoginPage({ onLogin, onRegister }: { onLogin: (account: AccountRecord) 
           </form>
           <p className="text-center text-xs text-[#94a3b8] mt-6">
             {"Belum punya akun? "}
-            <button onClick={onRegister} className="text-[#1e40af] hover:underline" style={{ fontWeight: 600 }}>Daftar di sini</button>
+            <button
+              onClick={onRegister}
+              className="text-[#1e40af] hover:underline"
+              style={{ fontWeight: 600 }}
+            >
+              Daftar di sini
+            </button>
           </p>
           <p className="text-center text-xs text-[#94a3b8] mt-2">
             Akses hanya untuk karyawan PT SGN yang terdaftar.
@@ -1309,24 +1559,9 @@ function ProfilePanel({
   }[] = [
     { key: "name", label: "Nama Lengkap", placeholder: "Masukkan nama" },
     { key: "email", label: "Email", placeholder: "nama@sgn.com", locked: true },
-    {
-      key: "jabatan",
-      label: "Jabatan",
-      placeholder: "Jabatan Anda",
-      locked: !isAdmin,
-    },
-    {
-      key: "departemen",
-      label: "Departemen",
-      placeholder: "Departemen Anda",
-      locked: !isAdmin,
-    },
-    {
-      key: "nip",
-      label: "NIP / ID",
-      placeholder: "ID Karyawan",
-      locked: !isAdmin,
-    },
+    { key: "jabatan", label: "Jabatan", placeholder: "Jabatan Anda" },
+    { key: "departemen", label: "Departemen", placeholder: "Departemen Anda" },
+    { key: "nik", label: "NIK / ID", placeholder: "ID Karyawan" },
   ]
 
   return (
@@ -1584,7 +1819,7 @@ function ProfilePanel({
                 <line x1="12" y1="16" x2="12.01" y2="16" />
               </svg>
               <p className="text-[10px] text-amber-700 leading-relaxed">
-                Jabatan, Departemen, dan NIP hanya dapat diubah oleh
+                Jabatan, Departemen, dan NIK hanya dapat diubah oleh
                 Administrator.
               </p>
             </div>
@@ -1725,18 +1960,6 @@ function Header({
         </div>
       </div>
       <div className="flex items-center gap-3">
-        <button className="relative p-2 rounded-lg text-[#64748b] hover:bg-[#f1f5f9] transition-colors">
-          <svg
-            className="w-4.5 h-4.5"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={1.8}
-            viewBox="0 0 24 24"
-          >
-            <path d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
-          </svg>
-          <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 bg-red-500 rounded-full" />
-        </button>
         {/* Clickable profile chip */}
         <button
           onClick={() => setPanelOpen((v) => !v)}
@@ -2128,12 +2351,14 @@ function SopRefCard({ refs }: { refs: SopRef[] }) {
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
 function ChatPage({
+  userId,
   sessions,
   setSessions,
   onWeeklyCount,
   openSessionId,
   onClearOpenSession,
 }: {
+  userId: string
   sessions: ChatSession[]
   setSessions: React.Dispatch<React.SetStateAction<ChatSession[]>>
   onWeeklyCount: () => void
@@ -2144,6 +2369,24 @@ function ChatPage({
   const [input, setInput] = useState("")
   const [isTyping, setIsTyping] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    console.log("[ChatPage] VITE_CHAT_URL =", N8N_CHAT_URL)
+  }, [])
+
+  useEffect(() => {
+    const el = textareaRef.current
+    if (!el) return
+    if (!input) {
+      el.style.height = "24px"
+      el.scrollTop = 0
+      return
+    }
+    el.style.height = "0px"
+    console.log("[Chat textarea] scrollHeight:", el.scrollHeight)
+    el.style.height = el.scrollHeight + "px"
+  }, [input])
 
   const activeSession = sessions.find((s) => s.id === activeId) ?? null
 
@@ -2160,7 +2403,12 @@ function ChatPage({
   }, [activeSession?.messages, isTyping])
 
   const startNew = useCallback(() => {
-    const id = `session-${Date.now()}`
+    // sessionId unik & terikat ke akun yang login (bukan sekadar random per-tab).
+    const unique =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const id = `session-${userId || "anon"}-${unique}`
     const newSession: ChatSession = {
       id,
       title: "Percakapan Baru",
@@ -2177,7 +2425,7 @@ function ChatPage({
     }
     setSessions((prev) => [newSession, ...prev])
     setActiveId(id)
-  }, [setSessions])
+  }, [setSessions, userId])
 
   const sendMessage = () => {
     if (!input.trim() || isTyping) return
@@ -2213,24 +2461,90 @@ function ChatPage({
     setIsTyping(true)
     onWeeklyCount()
 
-    setTimeout(() => {
-      const response = makeAiResponse(text)
-      const aiMsg: Message = {
-        id: Date.now() + 1,
-        role: "ai",
-        timestamp: new Date(),
-        feedback: null,
-        ...response,
+    const sessionId = activeId
+    ;(async () => {
+      const controller = new AbortController()
+      const timeoutId = window.setTimeout(() => controller.abort(), 120_000)
+      try {
+        const payload = {
+          action: "sendMessage",
+          chatInput: text,
+          sessionId,
+        }
+        console.log("=== [Chat] DEBUG ===")
+        console.log("[Chat] URL:", N8N_CHAT_URL)
+        console.log(
+          "[Chat] import.meta.env.VITE_CHAT_URL:",
+          import.meta.env.VITE_CHAT_URL,
+        )
+        console.log("[Chat] Payload:", JSON.stringify(payload))
+        const res = await fetch(N8N_CHAT_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        })
+        console.log("[Chat] Response status:", res.status)
+        const rawText = await res.text()
+        console.log("[Chat] Response body:", rawText)
+        if (!res.ok) throw new Error(`Server error ${res.status}: ${rawText}`)
+        let data: Record<string, unknown> = {}
+        try {
+          data = JSON.parse(rawText)
+        } catch {
+          data = { output: rawText }
+        }
+        const aiText: string =
+          data.output as string ??
+          data.text as string ??
+          data.message as string ??
+          data.response as string ??
+          (rawText.trim() || "Maaf, tidak ada respons dari server.")
+        const referencedFiles = parseReferencedFiles(data)
+        const aiMsg: Message = {
+          id: Date.now() + 1,
+          role: "ai",
+          text: aiText,
+          referencedFiles:
+            referencedFiles.length > 0 ? referencedFiles : undefined,
+          timestamp: new Date(),
+          feedback: null,
+        }
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === sessionId
+              ? {
+                  ...s,
+                  messages: [...s.messages, aiMsg],
+                  updatedAt: new Date(),
+                }
+              : s,
+          ),
+        )
+      } catch {
+        const aiMsg: Message = {
+          id: Date.now() + 1,
+          role: "ai",
+          text: "Maaf, layanan AI sedang mengalami gangguan. Silakan coba lagi beberapa saat.",
+          timestamp: new Date(),
+          feedback: null,
+        }
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === sessionId
+              ? {
+                  ...s,
+                  messages: [...s.messages, aiMsg],
+                  updatedAt: new Date(),
+                }
+              : s,
+          ),
+        )
+      } finally {
+        window.clearTimeout(timeoutId)
+        setIsTyping(false)
       }
-      setSessions((prev) =>
-        prev.map((s) =>
-          s.id === activeId
-            ? { ...s, messages: [...s.messages, aiMsg], updatedAt: new Date() }
-            : s,
-        ),
-      )
-      setIsTyping(false)
-    }, 1800)
+    })()
   }
 
   const setFeedback = (
@@ -2404,21 +2718,14 @@ function ChatPage({
                     }`}
                     style={{ maxWidth: "min(92%, 560px)" }}
                   >
-                    {/* Avatar — hidden on tiny screens to gain width */}
-                    {msg.role === "ai" ? (
+                    {/* AI avatar */}
+                    {msg.role === "ai" && (
                       <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-white border border-[#e2e8f0] flex items-center justify-center flex-shrink-0 mt-0.5">
                         <img
                           src={logoImg}
                           alt="AI"
                           className="w-4 h-4 sm:w-5 sm:h-5 object-contain"
                         />
-                      </div>
-                    ) : (
-                      <div
-                        className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-[#334155] flex items-center justify-center flex-shrink-0 mt-0.5 text-white text-[10px] sm:text-xs"
-                        style={{ fontWeight: 600 }}
-                      >
-                        U
                       </div>
                     )}
 
@@ -2440,23 +2747,14 @@ function ChatPage({
                             : undefined
                         }
                       >
-                        {msg.text.split("\n").map((line, i, arr) => {
-                          const parts = line.split(/\*\*(.*?)\*\*/g)
-                          return (
-                            <span key={i}>
-                              {parts.map((p, j) =>
-                                j % 2 === 1 ? (
-                                  <strong key={j} style={{ fontWeight: 600 }}>
-                                    {p}
-                                  </strong>
-                                ) : (
-                                  p
-                                ),
-                              )}
-                              {i < arr.length - 1 && <br />}
-                            </span>
-                          )
-                        })}
+                        {renderMessageMarkdown(
+                          msg.text,
+                          `underline underline-offset-2 break-all ${
+                            msg.role === "user"
+                              ? "text-white"
+                              : "text-[#1e40af]"
+                          }`,
+                        )}
                       </div>
                       <p className="text-[10px] text-[#94a3b8] mt-1 px-0.5">
                         {formatTime(msg.timestamp)}
@@ -2465,6 +2763,39 @@ function ChatPage({
                       {msg.sopRefs && msg.sopRefs.length > 0 && (
                         <SopRefCard refs={msg.sopRefs} />
                       )}
+
+                      {msg.referencedFiles &&
+                        msg.referencedFiles.length > 0 && (
+                          <div className="mt-2 flex flex-col gap-1.5">
+                            {msg.referencedFiles.map((file, i) => (
+                              <a
+                                key={i}
+                                href={file.url}
+                                download={file.name}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-2 text-[11px] sm:text-xs text-[#1e40af] border border-[#2563eb]/30 bg-[#e8f0fe] px-3 py-2 rounded-xl hover:bg-[#dbeafe] transition-colors w-fit max-w-full"
+                                style={{ fontWeight: 600 }}
+                                title={`Download ${file.name}`}
+                              >
+                                <svg
+                                  className="w-3.5 h-3.5 shrink-0"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth={2}
+                                  viewBox="0 0 24 24"
+                                >
+                                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                                  <polyline points="7 10 12 15 17 10" />
+                                  <line x1="12" y1="15" x2="12" y2="3" />
+                                </svg>
+                                <span className="truncate">
+                                  Download {file.name}
+                                </span>
+                              </a>
+                            ))}
+                          </div>
+                        )}
 
                       {msg.role === "ai" &&
                         msg.id !== activeSession.messages[0].id && (
@@ -2616,15 +2947,16 @@ function ChatPage({
 
         {/* Input */}
         <div
-          className="bg-white px-3 sm:px-5 py-3 sm:py-4"
+          className="bg-white px-3 sm:px-5 py-3 lg:py-3.5"
           style={{
             boxShadow: "0 -1px 0 #e2e8f0, 0 -4px 16px rgba(0,0,0,0.04)",
           }}
         >
           <div className="flex items-end gap-2">
             {/* Textarea box */}
-            <div className="flex-1 bg-white border-2 border-[#e2e8f0] rounded-2xl px-3 py-2.5 sm:px-4 sm:py-3 focus-within:border-[#1e40af] focus-within:shadow-[0_0_0_3px_rgba(37,99,235,0.12)] transition-all">
+            <div className="min-w-0 w-[calc(100%-3rem)] sm:w-[calc(100%-3.25rem)] self-end bg-white border-2 border-[#e2e8f0] rounded-2xl px-3 py-2 sm:px-4 focus-within:border-[#1e40af] focus-within:shadow-[0_0_0_3px_rgba(37,99,235,0.12)] transition-[border-color,box-shadow] overflow-hidden">
               <textarea
+                ref={textareaRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => {
@@ -2635,8 +2967,7 @@ function ChatPage({
                 }}
                 placeholder="Ketik pertanyaan Anda..."
                 rows={1}
-                className="w-full bg-transparent text-[13px] sm:text-sm text-[#1e293b] placeholder-[#94a3b8] resize-none outline-none leading-relaxed block"
-                style={{ maxHeight: "100px" }}
+                className="w-full h-6 min-h-6 max-h-28 bg-transparent text-[13px] sm:text-sm text-[#1e293b] placeholder-[#94a3b8] resize-none outline-none leading-relaxed block overflow-y-auto transition-[height] duration-100 ease-out [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
               />
             </div>
 
@@ -2919,9 +3250,9 @@ function ProfilePage({
       required: true,
     },
     {
-      key: "nip",
-      label: "NIP / ID Karyawan",
-      placeholder: "Masukkan NIP/ID karyawan",
+      key: "nik",
+      label: "NIK / ID Karyawan",
+      placeholder: "Masukkan NIK/ID karyawan",
     },
     { key: "perusahaan", label: "Perusahaan", placeholder: "PT SGN" },
   ]
@@ -2955,7 +3286,7 @@ function ProfilePage({
     if (fileInputRef.current) fileInputRef.current.value = ""
   }
 
-  const requiredKeys: (keyof UserProfile)[] = [
+  const requiredKeys: keyof UserProfile[] = [
     "name",
     "email",
     "jabatan",
@@ -3373,7 +3704,6 @@ function ProfilePage({
 
 // ── Root ──────────────────────────────────────────────────────────────────────
 // ── SOP Management (Admin only) ───────────────────────────────────────────────
-const INITIAL_DOCS: SopDoc[] = []
 
 function formatFileSize(bytes: number) {
   if (bytes >= 1000000) return `${(bytes / 1000000).toFixed(1)} MB`
@@ -3391,13 +3721,30 @@ function getCatColor(cat: string) {
 }
 
 function SopManagementPage({ profile }: { profile: UserProfile }) {
-  const [docs, setDocs] = useState<SopDoc[]>(INITIAL_DOCS)
+  const [docs, setDocs] = useState<SopDoc[]>([])
+  const [docsLoading, setDocsLoading] = useState(true)
   const [categories, setCategories] = useState<string[]>([
     "SGN",
     "Holding",
     "Perpres",
     "Permen",
   ])
+
+  useEffect(() => {
+    setDocsLoading(true)
+    proxiedFetch(N8N_GET_SOP_DOCS_URL, { method: "GET" })
+      .then((r) => r.json())
+      .then((data: SopDoc[]) => {
+        const arr = Array.isArray(data) ? data : []
+        setDocs(arr.map((d) => ({ ...d, uploadedAt: new Date(d.uploadedAt) })))
+        const cats = [...new Set(arr.map((d) => d.category))].filter(Boolean)
+        if (cats.length > 0) {
+          setCategories((prev) => [...new Set([...prev, ...cats])])
+        }
+      })
+      .catch(() => {})
+      .finally(() => setDocsLoading(false))
+  }, [])
   const [filterCat, setFilterCat] = useState<string>("Semua")
   const [search, setSearch] = useState("")
   const [showUpload, setShowUpload] = useState(false)
@@ -3553,20 +3900,36 @@ function SopManagementPage({ profile }: { profile: UserProfile }) {
     })
   }
 
-  const handleUpload = () => {
+  const [uploading, setUploading] = useState(false)
+
+  const handleUpload = async () => {
     if (pendingFiles.length === 0) return
-    const now = new Date()
-    const newDocs: SopDoc[] = pendingFiles.map((f, i) => ({
-      id: `d${Date.now()}-${i}`,
-      title: f.name.replace(/\.[^.]+$/, ""),
-      category: f.category,
-      fileName: f.name,
-      fileSize: f.size,
-      fileDataUrl: f.dataUrl,
-      uploadedAt: now,
-      uploadedBy: profile.name || "Admin",
-    }))
-    setDocs((prev) => [...newDocs, ...prev])
+    setUploading(true)
+    try {
+      const results = await Promise.all(
+        pendingFiles.map(async (f) => {
+          const body = JSON.stringify({
+            fileName: f.name,
+            fileSize: f.size,
+            fileDataUrl: f.dataUrl,
+            category: f.category,
+            title: f.name.replace(/\.[^.]+$/, ""),
+            uploadedBy: profile.name || "Admin",
+          })
+          const res = await proxiedFetch(N8N_UPLOAD_SOP_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body,
+          })
+          return res.ok ? await res.json() : null
+        }),
+      )
+      const newDocs: SopDoc[] = results
+        .filter(Boolean)
+        .map((d: SopDoc) => ({ ...d, uploadedAt: new Date(d.uploadedAt) }))
+      setDocs((prev) => [...newDocs, ...prev])
+    } catch {}
+    setUploading(false)
     setPendingFiles([])
     setShowUpload(false)
     if (fileRef.current) fileRef.current.value = ""
@@ -3576,6 +3939,16 @@ function SopManagementPage({ profile }: { profile: UserProfile }) {
   categories.forEach((c) => {
     catCounts[c] = docs.filter((d) => d.category === c).length
   })
+
+  if (docsLoading)
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-8 h-8 border-2 border-[#1e40af] border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-sm text-[#64748b]">Memuat dokumen SOP...</p>
+        </div>
+      </div>
+    )
 
   return (
     <div
@@ -4229,7 +4602,7 @@ function SopManagementPage({ profile }: { profile: UserProfile }) {
                 </button>
                 <button
                   onClick={handleUpload}
-                  disabled={pendingFiles.length === 0}
+                  disabled={pendingFiles.length === 0 || uploading}
                   className="flex-1 py-2.5 rounded-xl text-sm text-white transition-all disabled:opacity-40"
                   style={{
                     fontWeight: 600,
@@ -4237,9 +4610,11 @@ function SopManagementPage({ profile }: { profile: UserProfile }) {
                       "linear-gradient(135deg, rgb(30, 64, 175) 0%, rgb(37, 99, 235) 100%)",
                   }}
                 >
-                  {pendingFiles.length > 0
-                    ? `Upload ${pendingFiles.length} File`
-                    : "Upload"}
+                  {uploading
+                    ? "Mengupload..."
+                    : pendingFiles.length > 0
+                      ? `Upload ${pendingFiles.length} File`
+                      : "Upload"}
                 </button>
               </div>
             </div>
@@ -4372,7 +4747,16 @@ function SopManagementPage({ profile }: { profile: UserProfile }) {
                               Batal
                             </button>
                             <button
-                              onClick={() => {
+                              onClick={async () => {
+                                try {
+                                  await proxiedFetch(N8N_DELETE_SOP_URL, {
+                                    method: "POST",
+                                    headers: {
+                                      "Content-Type": "application/json",
+                                    },
+                                    body: JSON.stringify({ id: doc.id }),
+                                  })
+                                } catch {}
                                 setDocs((prev) =>
                                   prev.filter((d) => d.id !== doc.id),
                                 )
@@ -4479,7 +4863,7 @@ function SopManagementPage({ profile }: { profile: UserProfile }) {
   )
 }
 
-const PAGE_META: Record<Page, { title: string; subtitle?: string }> = {
+const PAGE_META: Record<Page, { title: string subtitle?: string }> = {
   login: { title: "" },
   dashboard: { title: "Dashboard", subtitle: "Ringkasan aktivitas Anda" },
   chat: { title: "Chat AI", subtitle: "Tanyakan SOP & prosedur perusahaan" },
@@ -4489,9 +4873,21 @@ const PAGE_META: Record<Page, { title: string; subtitle?: string }> = {
 }
 
 // ── localStorage helpers ──────────────────────────────────────────────────────
-function loadSessions(): ChatSession[] {
+// Riwayat chat DIPISAH per akun. Key = `sgn_chat_sessions_${userId}` sehingga
+// riwayat admin dan user tidak pernah tercampur di device/browser yang sama.
+function chatStorageKey(userId: string) {
+  return `sgn_chat_sessions_${userId}`
+}
+
+// Turunkan identitas unik & stabil dari akun yang login (email di-lowercase).
+function deriveUserId(profile: UserProfile): string {
+  return (profile.email || profile.nik || "").toLowerCase()
+}
+
+function loadSessions(userId: string): ChatSession[] {
+  if (!userId) return []
   try {
-    const raw = localStorage.getItem("sgn_chat_sessions")
+    const raw = localStorage.getItem(chatStorageKey(userId))
     if (!raw) return []
     const parsed = JSON.parse(raw) as Array<ChatSession & {
       updatedAt: string
@@ -4510,9 +4906,10 @@ function loadSessions(): ChatSession[] {
   }
 }
 
-function saveSessions(sessions: ChatSession[]) {
+function saveSessions(userId: string, sessions: ChatSession[]) {
+  if (!userId) return
   try {
-    localStorage.setItem("sgn_chat_sessions", JSON.stringify(sessions))
+    localStorage.setItem(chatStorageKey(userId), JSON.stringify(sessions))
   } catch {}
 }
 
@@ -4520,7 +4917,9 @@ export default function App() {
   const [page, setPage] = useState<Page>("login")
   const [showRegister, setShowRegister] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [sessions, setSessions] = useState<ChatSession[]>(() => loadSessions())
+  // Riwayat chat baru dimuat SETELAH login, khusus milik akun yang bersangkutan.
+  const [sessions, setSessions] = useState<ChatSession[]>([])
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null)
   const [activeChatId, setActiveChatId] = useState<string | null>(null)
   const [weeklyCount, setWeeklyCount] = useState(12)
   const [profile, setProfile] = useState<UserProfile>({
@@ -4529,13 +4928,29 @@ export default function App() {
     jabatan: "",
     departemen: "",
     perusahaan: "PT SGN",
-    nip: "",
+    nik: "",
   })
 
-  // Persist sessions to localStorage whenever they change
+  // Persist sessions ke localStorage per akun yang sedang login.
   useEffect(() => {
-    saveSessions(sessions)
-  }, [sessions])
+    if (currentUserId) saveSessions(currentUserId, sessions)
+  }, [sessions, currentUserId])
+
+  const handleLogout = () => {
+    // Bersihkan riwayat dari memory/state sebelum akun lain login di device ini.
+    setSessions([])
+    setActiveChatId(null)
+    setCurrentUserId(null)
+    setProfile({
+      name: "",
+      email: "",
+      jabatan: "",
+      departemen: "",
+      perusahaan: "PT SGN",
+      nik: "",
+    })
+    setPage("login")
+  }
 
   if (page === "login" && showRegister)
     return <RegisterPage onBack={() => setShowRegister(false)} />
@@ -4545,16 +4960,21 @@ export default function App() {
       <LoginPage
         onRegister={() => setShowRegister(true)}
         onLogin={(account) => {
-          setProfile((prev) => ({
-            ...prev,
+          const nextProfile: UserProfile = {
             email: account.email,
             name: account.name,
             jabatan: account.jabatan,
             departemen: account.departemen,
-            nip: account.nip,
+            nik: account.nik,
             perusahaan: "PT SGN",
             role: account.role,
-          }))
+          }
+          setProfile(nextProfile)
+          // Muat HANYA riwayat chat milik akun ini.
+          const userId = deriveUserId(nextProfile)
+          setCurrentUserId(userId)
+          setSessions(loadSessions(userId))
+          setActiveChatId(null)
           setPage("dashboard")
         }}
       />
@@ -4565,7 +4985,7 @@ export default function App() {
       <Sidebar
         page={page}
         setPage={setPage}
-        onLogout={() => setPage("login")}
+        onLogout={handleLogout}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         role={profile.role}
@@ -4577,7 +4997,7 @@ export default function App() {
           onMenuOpen={() => setSidebarOpen(true)}
           profile={profile}
           setProfile={setProfile}
-          onLogout={() => setPage("login")}
+          onLogout={handleLogout}
         />
         {page === "dashboard" && (
           <DashboardPage
@@ -4588,6 +5008,7 @@ export default function App() {
         )}
         {page === "chat" && (
           <ChatPage
+            userId={currentUserId ?? ""}
             sessions={sessions}
             setSessions={setSessions}
             onWeeklyCount={() => setWeeklyCount((v) => v + 1)}
@@ -4607,7 +5028,7 @@ export default function App() {
           <ProfilePage
             profile={profile}
             setProfile={setProfile}
-            onLogout={() => setPage("login")}
+            onLogout={handleLogout}
           />
         )}
         {page === "sop" && profile.role === "admin" && (
